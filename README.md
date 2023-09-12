@@ -49,7 +49,7 @@ PyDiff/
 ```
 
 ## Pretrained Model
-You can refer to the following links to download the [pretrained model](https://drive.google.com/file/d/1MMIrvyUzQ-NjmjQ5rAjTCO0OHKFk07Yy/view?usp=sharing) and put it in the following way:
+You can refer to the following links to download the [pretrained model](https://drive.google.com/file/d/1-WScg2H0jwzVvdbw2HrXxLjs4We5A_SI/view?usp=sharing) and put it in the following way:
 ```bash
 PyDiff/
     BasicSR-light/
