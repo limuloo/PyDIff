@@ -63,7 +63,7 @@ PyDiff/
 cd PyDiff/
 CUDA_VISIBLE_DEVICES=0 python pydiff/train.py -opt options/infer.yaml
 ```
-**NOTE: When testing on your own dataset, set 'use_kind_align' in 'infer.yaml' to false.**
+**NOTE: When testing on your own dataset, set 'use_kind_align' in 'infer.yaml' to false.** For details, please refer to https://github.com/limuloo/PyDIff/issues/6.
 
 ## Train
 The PyDiff is available for non-commercial research purposes only. When requesting the complete training code, please contact us using your institutional or school email address exclusively for research purposes.
