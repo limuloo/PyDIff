@@ -1,0 +1,153 @@
+# general settings
+name: train_v3
+model_type: PyDiffModel
+num_gpu: 2
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: train
+    type: LOL_Dataset
+    gt_root: YOUR_TRAIN_DATASET_GT_ROOT
+    input_root: YOUR_TRAIN_DATASET_INPUT_ROOT
+    input_mode: ~
+    concat_with_position_encoding: true
+    concat_with_hiseq: true
+    hiseq_random_cat: true
+    mean: [0.5, 0.5, 0.5]
+    std: [0.5, 0.5, 0.5]
+    use_flip: true
+
+    bright_aug: true
+    bright_aug_range: [0.5, 1.5]
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    # Please modify accordingly to use your own validation
+    # Or comment the val block if do not need validation during training
+    name: validation
+    type: LOL_Dataset
+    gt_root: YOUR_EVAL_DATASET_GT_ROOT
+    input_root: YOUR_EVAL_DATASET_INPUT_ROOT
+    concat_with_hiseq: true
+    input_mode: pad
+    divide: 32
+    concat_with_position_encoding: true
+    mean: [0.5, 0.5, 0.5]
+    std: [0.5, 0.5, 0.5]
+
+# network structures
+network_unet:
+  type: SR3UNet
+  in_channel: 13
+  out_channel: 3
+  inner_channel: 64
+  norm_groups: 32
+  channel_mults: [1,2,4,8,8]
+  attn_res: [16]
+  res_blocks: 2
+  dropout: 0.2
+  divide: 16
+
+network_global_corrector:
+  type: GlobalCorrector
+  normal01: true
+
+network_ddpm:
+  type: GaussianDiffusion
+  image_size: 128
+  channels: 3
+  conditional: true
+  color_limit: -1
+  pyramid_list: [1, 1, 2, 2]
+
+ddpm_schedule:
+  schedule: "linear"
+  n_timestep: 2000
+  linear_start: !!float 1e-6
+  linear_end: !!float 1e-2
+
+# path
+path:
+  pretrain_network_g: ~
+  param_key_g: params
+  strict_load_g: False
+  pretrain_network_d: ~
+  resume_state: ~
+  ignore_resume_networks: ['network_identity']
+
+# training settings
+train:
+  cs_on_shift: true
+  vis_train: true
+  vis_num: 150
+  train_type: ddpm_cs_pyramid
+  t_border: 1000
+  input_mode: crop
+  crop_size: [192, 288]
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+  optim_d:
+    type: Adam
+    lr: !!float 2e-3
+  optim_component:
+    type: Adam
+    lr: !!float 2e-3
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [50000, 75000, 100000, 150000, 200000]
+    gamma: 0.5
+
+  total_iter: 500000
+  warmup_iter: -1  # no warm up
+
+# validation settings
+val:
+  split_log: true
+  fix_seed: true
+  color_gamma: 1.0
+  use_up_v2: true
+  pyramid_list: [1, 1, 2, 2]
+  ddim_eta: !!float 1.0
+  ddim_timesteps: 4
+  use_kind_align: true
+  cal_all: true
+  show_all: true
+  val_freq: !!float 5000
+  save_img: true
+
+  metrics:
+    psnr: # metric name, can be arbitrary
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim_lol
+    lpips:
+      type: calculate_lpips_lol
+
+
+# logging settings
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 5000
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
+
+find_unused_parameters: true
