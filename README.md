@@ -1,6 +1,6 @@
 [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/pyramid-diffusion-models-for-low-light-image/low-light-image-enhancement-on-lol)](https://paperswithcode.com/sota/low-light-image-enhancement-on-lol?p=pyramid-diffusion-models-for-low-light-image)
 
-# [IJCAI 2023] Pyramid Diffusion Models For Low-light Image Enhancement
+# [IJCAI 2023 oral] Pyramid Diffusion Models For Low-light Image Enhancement
 ### [Paper](https://arxiv.org/pdf/2305.10028.pdf) | [Project Page](https://github.com/limuloo/PyDIff) | [Supplement Materials](https://drive.google.com/file/d/1_c5nM_bQkdDMWASpY-3aoxf_YYzfWCwf/view)
 **Pyramid Diffusion Models For Low-light Image Enhancement**
 <br>_Dewei Zhou, Zongxin Yang, Yi Yang_<br>
@@ -49,11 +49,7 @@ PyDiff/
 ```
 
 ## Pretrained Model
-<<<<<<< HEAD
-You can refer to the following links to download the [pretrained model](https://drive.google.com/file/d/1-WScg2H0jwzVvdbw2HrXxLjs4We5A_SI/view?usp=sharing) and put it in the following way:
-=======
 You can refer to the following links to download the [pretrained model](https://drive.google.com/file/d/1-WScg2H0jwzVvdbw2HrXxLjs4We5A_SI/view) and put it in the following way:
->>>>>>> 862f8cc428450ef02822fd218b15705e2214ec2d
 ```bash
 PyDiff/
     BasicSR-light/
