@@ -66,16 +66,34 @@ CUDA_VISIBLE_DEVICES=0 python pydiff/train.py -opt options/infer.yaml
 **NOTE: When testing on your own dataset, set 'use_kind_align' in 'infer.yaml' to false.** For details, please refer to https://github.com/limuloo/PyDIff/issues/6.
 
 ## Train
+### Training with 2 GPUs 
+
 For training purposes, the utilization of the following commands is advised if you possess 2 GPUs with a memory capacity of 24GB or higher, as outlined in the paper. 
+
 ```bash
 cd PyDiff/
 CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port=22666 pydiff/train.py -opt options/train_v1.yaml --launcher pytorch
 ```
-Otherwise, you can use the following commands for training, which requires a GPU with memory >=24GB.
+
+### Training with a single GPU 
+
+Otherwise, you can use the following commands for training, which requires 1 GPU with memory >=24GB.
+
 ```bash
 cd PyDiff/
 CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port=22666 pydiff/train.py -opt options/train_v2.yaml --launcher pytorch
 ```
+
+### Training on a Custom Low-Level Task Dataset
+
+Please update the following fields in the `PyDiff/options/train_v3.yaml` file: `YOUR_TRAIN_DATASET_GT_ROOT`, `YOUR_TRAIN_DATASET_INPUT_ROOT`, `YOUR_EVAL_DATASET_GT_ROOT`, and `YOUR_EVAL_DATASET_INPUT_ROOT`. If required, please also update the `PyDiff/pydiff/data/lol_dataset.py`. Finally, please employ the subsequent commands to initiate the training process:
+
+```bash
+cd PyDiff/
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port=22666 pydiff/train.py -opt options/train_v3.yaml --launcher pytorch
+```
+
+Please feel free to customize additional parameters to meet your specific requirements. To enable PyDiff to train on a single GPU, the `PyDiff/options/train_v2.yaml` file can be consulted.
 
 ## Citation
 If you find our work useful for your research, please cite our paper
