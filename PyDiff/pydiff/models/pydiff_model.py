@@ -66,6 +66,41 @@ class PyDiffModel(BaseModel):
             else:
                 self.lpips_bare_model = self.lpips
 
+
+
+        if self.is_train:
+            self.init_training_settings()
+
+    def init_training_settings(self):
+        self.ddpm.train()
+
+        # set up optimizers and schedulers
+        self.setup_optimizers()
+        self.setup_schedulers()
+
+    def setup_optimizers(self):
+        train_opt = self.opt['train']
+
+        # ----------- optimizer g ----------- #
+        net_g_reg_ratio = 1
+        normal_params = []
+        logger = get_root_logger()
+        for _, param in self.ddpm.named_parameters():
+            if self.opt['train'].get('frozen_denoise', False):
+                if 'denoise' in _:
+                    logger.info(f'frozen {_}')
+                    continue
+            normal_params.append(param)
+        optim_params_g = [{  # add normal params first
+            'params': normal_params,
+            'lr': train_opt['optim_g']['lr']
+        }]
+        optim_type = train_opt['optim_g'].pop('type')
+        lr = train_opt['optim_g']['lr'] * net_g_reg_ratio
+        betas = (0**net_g_reg_ratio, 0.99**net_g_reg_ratio)
+        self.optimizer_g = self.get_optimizer(optim_type, optim_params_g, lr, betas=betas)
+        self.optimizers.append(self.optimizer_g)
+
     def feed_data(self, data):
         self.LR = data['LR'].to(self.device)
         self.HR = data['HR'].to(self.device)
@@ -76,7 +111,65 @@ class PyDiffModel(BaseModel):
             self.pad_bottom = data['pad_bottom'].to(self.device)
 
     def optimize_parameters(self, current_iter):
-        pass
+        # if self.opt['train'].get('mask_loss', False):
+        #     assert self.opt['train'].get('cal_noise_only', False), "mask_loss can only used with cal_noise_only, now"
+        # optimize net_g
+        assert 'ddpm_cs' in self.opt['train'].get('train_type', None), "train_type must be ddpm_cs"
+        self.optimizer_g.zero_grad()
+        pred_noise, noise, x_recon_cs, x_start, t, color_scale = self.ddpm(self.HR, self.LR, 
+                  train_type=self.opt['train'].get('train_type', None),
+                  different_t_in_one_batch=self.opt['train'].get('different_t_in_one_batch', None),
+                  t_sample_type=self.opt['train'].get('t_sample_type', None),
+                  pred_type=self.opt['train'].get('pred_type', None),
+                  clip_noise=self.opt['train'].get('clip_noise', None),
+                  color_shift=self.opt['train'].get('color_shift', None),
+                  color_shift_with_schedule= self.opt['train'].get('color_shift_with_schedule', None),
+                  t_range=self.opt['train'].get('t_range', None),
+                  cs_on_shift=self.opt['train'].get('cs_on_shift', None),
+                  cs_shift_range=self.opt['train'].get('cs_shift_range', None),
+                  t_border=self.opt['train'].get('t_border', None),
+                  down_uniform=self.opt['train'].get('down_uniform', False),
+                  down_hw_split=self.opt['train'].get('down_hw_split', False),
+                  pad_after_crop=self.opt['train'].get('pad_after_crop', False),
+                  input_mode=self.opt['train'].get('input_mode', None),
+                  crop_size=self.opt['train'].get('crop_size', None),
+                  divide=self.opt['train'].get('divide', None),
+                  frozen_denoise=self.opt['train'].get('frozen_denoise', None),
+                  cs_independent=self.opt['train'].get('cs_independent', None),
+                  shift_x_recon_detach=self.opt['train'].get('shift_x_recon_detach', None))
+        if self.opt['train'].get('vis_train', False) and current_iter <= self.opt['train'].get('vis_num', 100) and \
+            self.opt['rank'] == 0:
+            '''
+            When the parameter 'vis_train' is set to True, the training process will be visualized. 
+            The value of 'vis_num' corresponds to the number of visualizations to be generated.
+            '''
+            save_img_path = osp.join(self.opt['path']['visualization'], 'train',
+                                            f'{current_iter}_noise_level_{self.bare_model.t}.png')
+            x_recon_print = tensor2img(self.bare_model.x_recon, min_max=(-1, 1))
+            noise_print = tensor2img(self.bare_model.noise, min_max=(-1, 1))
+            pred_noise_print = tensor2img(self.bare_model.pred_noise, min_max=(-1, 1))
+            x_start_print = tensor2img(self.bare_model.x_start, min_max=(-1, 1))
+            x_noisy_print = tensor2img(self.bare_model.x_noisy, min_max=(-1, 1))
+
+            img_print  = np.concatenate([x_start_print, noise_print, x_noisy_print, pred_noise_print, x_recon_print], axis=0)
+            imwrite(img_print, save_img_path)
+        l_g_total = 0
+        loss_dict = OrderedDict()
+
+        l_g_x0 = F.l1_loss(x_recon_cs, x_start) * self.opt['train'].get('l_g_x0_w', 1.0)
+        if self.opt['train'].get('gamma_limit_train', None) and color_scale <= self.opt['train'].get('gamma_limit_train', None):
+            l_g_x0 = l_g_x0 * 1e-12
+        loss_dict['l_g_x0'] = l_g_x0
+        l_g_total += l_g_x0
+
+        if not self.opt['train'].get('frozen_denoise', False):
+            l_g_noise = F.l1_loss(pred_noise, noise)
+            loss_dict['l_g_noise'] = l_g_noise
+            l_g_total += l_g_noise
+
+        l_g_total.backward()
+        self.optimizer_g.step()
+        self.log_dict = self.reduce_loss_dict(loss_dict)
 
     def test(self):
         if self.opt['val'].get('test_speed', False):

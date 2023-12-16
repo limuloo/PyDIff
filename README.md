@@ -66,7 +66,16 @@ CUDA_VISIBLE_DEVICES=0 python pydiff/train.py -opt options/infer.yaml
 **NOTE: When testing on your own dataset, set 'use_kind_align' in 'infer.yaml' to false.** For details, please refer to https://github.com/limuloo/PyDIff/issues/6.
 
 ## Train
-The PyDiff is available for non-commercial research purposes only. When requesting the complete training code, please contact us using your institutional or school email address exclusively for research purposes.
+For training purposes, the utilization of the following commands is advised if you possess 2 GPUs with a memory capacity of 24GB or higher, as outlined in the paper. 
+```bash
+cd PyDiff/
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.launch --nproc_per_node=2 --master_port=22666 pydiff/train.py -opt options/train_v1.yaml --launcher pytorch
+```
+Otherwise, you can use the following commands for training, which requires a GPU with memory >=24GB.
+```bash
+cd PyDiff/
+CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port=22666 pydiff/train.py -opt options/train_v2.yaml --launcher pytorch
+```
 
 ## Citation
 If you find our work useful for your research, please cite our paper

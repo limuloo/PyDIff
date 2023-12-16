@@ -323,3 +323,336 @@ class GaussianDiffusion(nn.Module):
             return ret_img
         else:
             return sample_img
+
+
+
+    def q_sample(self, x_start, continuous_sqrt_alpha_cumprod, noise=None):
+        noise = default(noise, lambda: torch.randn_like(x_start))
+
+        # random gama
+        return (
+            continuous_sqrt_alpha_cumprod * x_start +
+            (1 - continuous_sqrt_alpha_cumprod**2).sqrt() * noise
+        )
+
+    def p_losses(self, x_HR, x_SR, noise=None, different_t_in_one_batch=False, t_sample_type=None, pred_type='noise', clip_noise=False,\
+                 color_shift=None, color_prob=0.25, color_shift_with_schedule=False, t_range=None):
+        if not t_range:
+            t_range = [1, self.num_timesteps]
+        x_start = x_HR
+        [b, c, h, w] = x_start.shape
+        if different_t_in_one_batch:
+            t = torch.randint(0, self.num_timesteps, (b,)).long() + 1
+            t = t.to(x_start.device)
+            continuous_sqrt_alpha_cumprod = self._extract(torch.from_numpy(self.sqrt_alphas_cumprod_prev), t, x_start.shape)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(b, -1)
+        else:
+            if t_sample_type:
+                if t_sample_type == 'stack':
+                    if not hasattr(self, 'stack_sample_base'):
+                        self.stack_sample_base = [np.array([i] * i) for i in range(1, self.num_timesteps + 1)]
+                        self.stack_sample_base = np.concatenate(self.stack_sample_base)
+                    t = np.random.choice(self.stack_sample_base)
+            else:
+                t = np.random.randint(t_range[0], t_range[1] + 1) # [1, 2000] [1, 2001)
+            continuous_sqrt_alpha_cumprod = torch.FloatTensor(
+                np.random.uniform(
+                    self.sqrt_alphas_cumprod_prev[t-1],
+                    self.sqrt_alphas_cumprod_prev[t],
+                    size=b
+                )
+            ).to(x_start.device)
+            # continuous_sqrt_alpha_cumprod 是 sqrt(γ)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(
+                b, -1)
+
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        if color_shift and np.random.uniform(0., 1.) < color_prob:
+            shift_val = torch.from_numpy(np.random.uniform(-color_shift, +color_shift, (b, c))).to(x_start.device)
+            shift_val = torch.unsqueeze(shift_val, -1)
+            shift_val = torch.unsqueeze(shift_val, -1)
+            if color_shift_with_schedule:
+                shift_val *= self.sqrt_one_minus_alphas_cumprod[t - 1]
+            shift_val = shift_val.float()
+            x_start_color = x_start + shift_val
+            x_start_color = torch.clamp(x_start_color, -1, 1)
+            x_noisy = self.q_sample(
+                x_start=x_start_color, continuous_sqrt_alpha_cumprod=continuous_sqrt_alpha_cumprod.view(-1, 1, 1, 1), noise=noise)
+            noise = (self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - x_start) / self.sqrt_recipm1_alphas_cumprod[t - 1]
+        else:
+            x_noisy = self.q_sample(
+                x_start=x_start, continuous_sqrt_alpha_cumprod=continuous_sqrt_alpha_cumprod.view(-1, 1, 1, 1), noise=noise)
+
+        if not self.conditional:
+            model_output = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
+        else:
+            model_output = self.denoise_fn(
+                torch.cat([x_SR, x_noisy], dim=1), continuous_sqrt_alpha_cumprod)
+            # from zdw_scripts.utils import tensor2img
+            # tensor2img(x_in['SR'], min_max=(-1, 1)).save('./SR.png')
+            # tensor2img(x_in['HR'], min_max=(-1, 1)).save('./HR.png')
+            # tensor2img(x_noisy, min_max=(-1, 1)).save('./x_noisy.png')
+            # tensor2img(x_recon, min_max=(-1, 1)).save('./x_recon.png')
+            # tensor2img(noise, min_max=(-1, 1)).save('./noise.png')
+        if pred_type == 'noise':
+            if clip_noise:
+                model_output = torch.clamp(model_output, -1, 1)
+            self.noise = noise
+            self.pred_noise = model_output
+            self.x_start = x_start
+            self.x_noisy = x_noisy
+
+            self.x_recon = self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - self.sqrt_recipm1_alphas_cumprod[t - 1] * model_output
+            self.x_recon = torch.clamp(self.x_recon, -1, 1)
+            self.t = t - 1
+            
+            loss = self.loss_func(noise, model_output)
+            return loss
+        elif pred_type == 'x0':
+            self.noise = noise
+            self.x_start = x_start
+            self.x_noisy = x_noisy
+            self.x_recon = model_output
+            self.x_recon = torch.clamp(self.x_recon, -1, 1)
+            self.t = t - 1
+            self.pred_noise = (self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - self.x_recon) / self.sqrt_recipm1_alphas_cumprod[t - 1]
+            if clip_noise:
+                self.pred_noise = torch.clamp(self.pred_noise, -1, 1)
+            loss = self.loss_func(self.x_start, model_output)
+            return loss
+        else:
+            assert False, "pred_type, [noise, x0], choose one"
+    
+
+    def p_losses_cs(self, x_HR, x_SR, noise=None, different_t_in_one_batch=False, clip_noise=False, t_range=None, cs_on_shift=False,
+                    cs_shift_range=None, frozen_denoise=False, cs_independent=False, cs_independent_range=0.47,
+                    shift_x_recon_detach=False, shift_x_recon_detach_range=0.47):
+        assert not (cs_on_shift and cs_independent), "cs_on_shift, cs_independent, only one"
+        if not t_range:
+            t_range = [1, self.num_timesteps]
+        x_start = x_HR
+        [b, c, h, w] = x_start.shape
+        if different_t_in_one_batch:
+            t = torch.randint(0, self.num_timesteps, (b,)).long() + 1
+            t = t.to(x_start.device)
+            continuous_sqrt_alpha_cumprod = self._extract(torch.from_numpy(self.sqrt_alphas_cumprod_prev), t, x_start.shape)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(b, -1)
+        else:
+            t = np.random.randint(t_range[0], t_range[1] + 1) # [1, 2000] [1, 2001)
+            continuous_sqrt_alpha_cumprod = torch.FloatTensor(
+                np.random.uniform(
+                    self.sqrt_alphas_cumprod_prev[t-1],
+                    self.sqrt_alphas_cumprod_prev[t],
+                    size=b
+                )
+            ).to(x_start.device)
+            # continuous_sqrt_alpha_cumprod 是 sqrt(γ)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(
+                b, -1)
+
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        x_noisy = self.q_sample(
+            x_start=x_start, continuous_sqrt_alpha_cumprod=continuous_sqrt_alpha_cumprod.view(-1, 1, 1, 1), noise=noise)
+
+        if frozen_denoise:
+            with torch.no_grad():
+                if not self.conditional:
+                    model_output = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
+                else:
+                    model_output = self.denoise_fn(
+                        torch.cat([x_SR, x_noisy], dim=1), continuous_sqrt_alpha_cumprod)
+        else:
+            if not self.conditional:
+                model_output = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
+            else:
+                if self.resize_all:
+                    x_SR = F.interpolate(x_SR, (self.resize_res, self.resize_res))
+                    x_noisy = F.interpolate(x_noisy, (self.resize_res, self.resize_res))
+                    noise = F.interpolate(noise, (self.resize_res, self.resize_res))
+                    x_start = F.interpolate(x_start, (self.resize_res, self.resize_res))
+                model_output = self.denoise_fn(
+                    torch.cat([x_SR, x_noisy], dim=1), continuous_sqrt_alpha_cumprod)
+        if clip_noise:
+            model_output = torch.clamp(model_output, -1, 1)
+        self.noise = noise
+        self.pred_noise = model_output
+        self.pred_noise_detach = self.pred_noise.detach()
+        self.x_start = x_start
+        self.x_noisy = x_noisy
+
+        self.x_recon = self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - self.sqrt_recipm1_alphas_cumprod[t - 1] * model_output
+        self.x_recon = torch.clamp(self.x_recon, -1, 1)
+        self.t = t - 1
+
+        self.x_recon_detach = self.x_recon.detach()
+        if shift_x_recon_detach:
+            RGB_color_shift = np.random.uniform(-shift_x_recon_detach_range,
+                                                +shift_x_recon_detach_range,
+                                                (b, c))
+            RGB_color_shift = RGB_color_shift[:, :, None, None]
+            RGB_color_shift = torch.from_numpy(RGB_color_shift).to(self.x_recon_detach.device)
+            self.x_recon_detach = self.x_recon_detach + RGB_color_shift
+            self.x_recon_detach = torch.clamp(self.x_recon_detach, -1, 1).float()
+        if cs_on_shift:
+            RGB_color_shift = self.x_start - self.x_recon_detach
+            if not cs_shift_range:
+                RGB_color_shift_mean = torch.mean(RGB_color_shift, dim=[2, 3], keepdim=True)
+            else:
+                st = cs_shift_range[0]
+                ed = cs_shift_range[1]
+                cs_shift_scale = st + random.random() * (ed - st)
+
+                RGB_color_shift_mean = torch.mean(RGB_color_shift, dim=[2, 3], keepdim=True) * \
+                                       cs_shift_scale
+            x_start_shift = self.x_start - RGB_color_shift_mean
+            x_start_shift = torch.clamp(x_start_shift, -1, 1)
+            self.x_recon_cs = self.color_fn(x_start_shift, continuous_sqrt_alpha_cumprod)
+        elif cs_independent:
+            RGB_color_shift = np.random.uniform(-cs_independent_range,
+                                                +cs_independent_range,
+                                                (b, c))
+            RGB_color_shift = RGB_color_shift[:, :, None, None]
+            RGB_color_shift = torch.from_numpy(RGB_color_shift).to(self.x_start.device)
+            x_start_shift = self.x_start + RGB_color_shift
+            x_start_shift = torch.clamp(x_start_shift, -1, 1).float()
+            self.x_recon_cs = self.color_fn(x_start_shift, continuous_sqrt_alpha_cumprod)
+        else:
+            self.x_recon_cs = self.color_fn(self.x_recon_detach, continuous_sqrt_alpha_cumprod)
+        self.pred_noise_cs = (x_noisy - self.sqrt_alphas_cumprod[t - 1] * self.x_recon_cs) / \
+                             self.sqrt_one_minus_alphas_cumprod[t - 1]
+        continuous_sqrt_alpha_cumprod_mean = continuous_sqrt_alpha_cumprod.mean()
+        continuous_alpha_cumprod = continuous_sqrt_alpha_cumprod_mean * continuous_sqrt_alpha_cumprod_mean
+        color_scale = torch.sqrt((1 - continuous_alpha_cumprod) / continuous_alpha_cumprod)
+        return self.pred_noise, self.noise, self.x_recon_cs, self.x_start, self.t, color_scale
+        
+    def p_losses_cs_pyramid(self, x_HR, x_SR, noise=None, different_t_in_one_batch=False, clip_noise=False, t_range=None, cs_on_shift=False,
+                    cs_shift_range=None, t_border=1000, input_mode=None, crop_size=None, divide=None,
+                    shift_x_recon_detach=False, shift_x_recon_detach_range=0.47, frozen_denoise=False, down_uniform=False, down_hw_split=False, pad_after_crop=False):
+        assert input_mode is not None, "must indicate input_mode, [crop, pad]!!"
+        if not t_range:
+            t_range = [1, self.num_timesteps]
+        [b, c, h, w] = x_HR.shape
+        if different_t_in_one_batch:
+            t = torch.randint(0, self.num_timesteps, (b,)).long() + 1
+            t = t.to(x_HR.device)
+            continuous_sqrt_alpha_cumprod = self._extract(torch.from_numpy(self.sqrt_alphas_cumprod_prev), t, x_start.shape)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(b, -1)
+        else:
+            t = np.random.randint(t_range[0], t_range[1] + 1) # [1, 2000] [1, 2001)
+            continuous_sqrt_alpha_cumprod = torch.FloatTensor(
+                np.random.uniform(
+                    self.sqrt_alphas_cumprod_prev[t-1],
+                    self.sqrt_alphas_cumprod_prev[t],
+                    size=b
+                )
+            ).to(x_HR.device)
+            # continuous_sqrt_alpha_cumprod 是 sqrt(γ)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(
+                b, -1)
+        
+
+        r = self.downsampling_schedule[t - 1]
+        x_HR = F.interpolate(x_HR, (x_HR.shape[2] // r, x_HR.shape[3] // r))
+        x_SR = F.interpolate(x_SR, (x_SR.shape[2] // r, x_SR.shape[3] // r))
+        
+        _, _, H, W = x_HR.shape
+        if input_mode == 'crop':
+            if isinstance(crop_size, int):
+                crop_size = [crop_size, crop_size]
+            if H < crop_size[0]:
+                crop_size[0] = H
+            if W < crop_size[1]:
+                crop_size[1] = W
+            h = np.random.randint(0, H - crop_size[0] + 1)
+            w = np.random.randint(0, W - crop_size[1] + 1)
+            x_HR = x_HR[:, :, h: h + crop_size[0], w: w + crop_size[1]]
+            x_SR = x_SR[:, :, h: h + crop_size[0], w: w + crop_size[1]]
+        elif input_mode == 'pad':
+            assert False, "wait to do!!"
+        
+        if pad_after_crop:
+            x_HR, pad_left, pad_right, pad_top, pad_bottom = pad_tensor(x_HR, 16)
+            x_SR, pad_left, pad_right, pad_top, pad_bottom = pad_tensor(x_SR, 16)
+
+        x_start = x_HR
+        [b, c, h, w] = x_start.shape
+
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        x_noisy = self.q_sample(
+            x_start=x_start, continuous_sqrt_alpha_cumprod=continuous_sqrt_alpha_cumprod.view(-1, 1, 1, 1), noise=noise)
+
+        if frozen_denoise:
+            with torch.no_grad():
+                if not self.conditional:
+                    model_output = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
+                else:
+                    model_output = self.denoise_fn(
+                        torch.cat([x_SR, x_noisy], dim=1), continuous_sqrt_alpha_cumprod)
+        else:
+            if not self.conditional:
+                model_output = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
+            else:
+                model_output = self.denoise_fn(
+                    torch.cat([x_SR, x_noisy], dim=1), continuous_sqrt_alpha_cumprod)
+        if clip_noise:
+            model_output = torch.clamp(model_output, -1, 1)
+        if pad_after_crop:
+            noise = pad_tensor_back(noise, pad_left, pad_right, pad_top, pad_bottom)
+            model_output = pad_tensor_back(model_output, pad_left, pad_right, pad_top, pad_bottom)
+            x_start = pad_tensor_back(x_start, pad_left, pad_right, pad_top, pad_bottom)
+            x_noisy = pad_tensor_back(x_noisy, pad_left, pad_right, pad_top, pad_bottom)
+        self.noise = noise
+        self.pred_noise = model_output
+        self.pred_noise_detach = self.pred_noise.detach()
+        self.x_start = x_start
+        self.x_noisy = x_noisy
+
+        self.x_recon = self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - self.sqrt_recipm1_alphas_cumprod[t - 1] * model_output
+        self.x_recon = torch.clamp(self.x_recon, -1, 1)
+        self.t = t - 1
+
+        self.x_recon_detach = self.x_recon.detach()
+        if shift_x_recon_detach:
+            RGB_color_shift = np.random.uniform(-shift_x_recon_detach_range,
+                                                +shift_x_recon_detach_range,
+                                                (b, c))
+            RGB_color_shift = RGB_color_shift[:, :, None, None]
+            RGB_color_shift = torch.from_numpy(RGB_color_shift).to(self.x_recon_detach.device)
+            self.x_recon_detach = self.x_recon_detach + RGB_color_shift
+            self.x_recon_detach = torch.clamp(self.x_recon_detach, -1, 1).float()
+        if cs_on_shift:
+            RGB_color_shift = self.x_start - self.x_recon_detach
+            if not cs_shift_range:
+                RGB_color_shift_mean = torch.mean(RGB_color_shift, dim=[2, 3], keepdim=True)
+            else:
+                st = cs_shift_range[0]
+                ed = cs_shift_range[1]
+                cs_shift_scale = st + random.random() * (ed - st)
+
+                RGB_color_shift_mean = torch.mean(RGB_color_shift, dim=[2, 3], keepdim=True) * \
+                                       cs_shift_scale
+            x_start_shift = self.x_start - RGB_color_shift_mean
+            x_start_shift = torch.clamp(x_start_shift, -1, 1)
+            self.x_recon_cs = self.color_fn(x_start_shift, continuous_sqrt_alpha_cumprod)
+        else:
+            self.x_recon_cs = self.color_fn(self.x_recon_detach, continuous_sqrt_alpha_cumprod)
+        self.pred_noise_cs = (x_noisy - self.sqrt_alphas_cumprod[t - 1] * self.x_recon_cs) / \
+                             self.sqrt_one_minus_alphas_cumprod[t - 1]
+        continuous_sqrt_alpha_cumprod_mean = continuous_sqrt_alpha_cumprod.mean()
+        continuous_alpha_cumprod = continuous_sqrt_alpha_cumprod_mean * continuous_sqrt_alpha_cumprod_mean
+        color_scale = torch.sqrt((1 - continuous_alpha_cumprod) / continuous_alpha_cumprod)
+        return self.pred_noise, self.noise, self.x_recon_cs, self.x_start, self.t, color_scale
+
+    def forward(self, x_HR, x_SR, train_type='ddpm', *args, **kwargs):
+        kwargs_cp = kwargs.copy()
+        for k in kwargs_cp:
+            if kwargs[k] is None:
+                kwargs.pop(k)
+        if train_type == 'ddpm':
+            return self.p_losses(x_HR, x_SR, *args, **kwargs)
+        elif train_type == 'ddpm_cs':
+            return self.p_losses_cs(x_HR, x_SR, *args, **kwargs)
+        elif train_type == 'ddpm_cs_pyramid':
+            return self.p_losses_cs_pyramid(x_HR, x_SR, *args, **kwargs)
+        else:
+            assert False, f"Wrong train_type={train_type}"
