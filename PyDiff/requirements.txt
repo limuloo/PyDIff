@@ -11,7 +11,7 @@ pyyaml
 tb-nightly
 yapf
 # mxnet-cu102<1.8.0
-sklearn
+# sklearn
 easydict
 rawpy
 kornia==0.5.11
